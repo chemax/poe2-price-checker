@@ -59,7 +59,9 @@ func (c *Client) Search(ctx context.Context, query json.RawMessage) (SearchRespo
 		if err != nil {
 			return err
 		}
+		c.applyBrowserLikeHeaders(req)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Referer", fmt.Sprintf("%s/trade2/search/poe2/%s", c.baseURL, url.PathEscape(c.league)))
 		req.Header.Set("Cookie", c.cookieHeader)
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -89,6 +91,8 @@ func (c *Client) Fetch(ctx context.Context, queryID string, itemIDs []string) (F
 		if err != nil {
 			return err
 		}
+		c.applyBrowserLikeHeaders(req)
+		req.Header.Set("Referer", fmt.Sprintf("%s/trade2/search/poe2/%s/%s", c.baseURL, url.PathEscape(c.league), queryID))
 		req.Header.Set("Cookie", c.cookieHeader)
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -105,6 +109,17 @@ func (c *Client) Fetch(ctx context.Context, queryID string, itemIDs []string) (F
 		return json.NewDecoder(resp.Body).Decode(&out)
 	})
 	return out, err
+}
+
+func (c *Client) applyBrowserLikeHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Origin", c.baseURL)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 }
 
 type retryableStatus struct{ code int }

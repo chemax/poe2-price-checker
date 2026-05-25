@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -42,6 +44,10 @@ type itemHashes map[string]map[int]string // mod_type -> local index -> hash
 
 func (m *ModMatcher) Run(ctx context.Context) (string, error) {
 	exactMap, patterns, err := loadStatPatterns(ctx, m.db)
+	if err != nil {
+		return "", err
+	}
+	hashToStatID, hashKnown := loadTrade2HashMap(ctx, exactMap, patterns)
 	if err != nil {
 		return "", err
 	}
@@ -87,13 +93,26 @@ ORDER BY im.item_id, im.mod_type, im.sort_order`)
 		hash := currentHashes[modType][idx]
 
 		norm := normalizeLine(line)
-		statID := findStatID(norm, exactMap, patterns)
-		matchedViaText := statID != ""
+		statID := ""
+		mappedByHash := false
+		if hash != "" {
+			if s, ok := hashToStatID[hash]; ok {
+				statID = s
+				mappedByHash = true
+			}
+		}
+		if statID == "" {
+			statID = findStatID(norm, exactMap, patterns)
+		}
 
 		if statID == "" {
 			reason := "unknown_stat_id"
 			if hash == "" {
 				reason = "text_only_fallback"
+			} else if _, ok := hashKnown[hash]; ok {
+				reason = "unknown_stat_id"
+			} else {
+				reason = "missing_hash_in_ref"
 			}
 			if err := setUnmatched(ctx, m.db, itemID, modType, sortOrder, hash, reason); err != nil {
 				return "", err
@@ -121,14 +140,11 @@ ORDER BY im.item_id, im.mod_type, im.sort_order`)
 		rollPcts := computeRollPcts(mod.Stats, rollRaw)
 		rollPctsJSON, _ := json.Marshal(rollPcts)
 		reason := "hash_matched"
-		if hash == "" {
+		if !mappedByHash {
 			reason = "text_only_fallback"
 		}
 		if len(rollPcts) > 0 && len(mod.Stats) > len(rollPcts) {
 			reason = "hybrid_partial"
-		}
-		if !matchedViaText && hash != "" {
-			reason = "unknown_stat_id"
 		}
 
 		if _, err := m.db.ExecContext(ctx, `
@@ -191,6 +207,67 @@ func extractItemHashes(payloadRaw []byte) itemHashes {
 		out[t] = m
 	}
 	return out
+}
+
+type trade2StatsResp struct {
+	Result []struct {
+		Entries []struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"entries"`
+	} `json:"result"`
+}
+
+func loadTrade2HashMap(ctx context.Context, exactMap map[string]string, patterns []statPattern) (map[string]string, map[string]struct{}) {
+	out := map[string]string{}
+	known := map[string]struct{}{}
+
+	cookie := strings.TrimSpace(os.Getenv("POESESSID"))
+	cf := strings.TrimSpace(os.Getenv("CF_CLEARANCE"))
+	if cookie == "" || cf == "" {
+		return out, known
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.pathofexile.com/api/trade2/data/stats", nil)
+	if err != nil {
+		return out, known
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Origin", "https://www.pathofexile.com")
+	req.Header.Set("Referer", "https://www.pathofexile.com/trade2/search/poe2/Standard")
+	req.Header.Set("Cookie", "cf_clearance="+cf+"; POESESSID="+cookie)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return out, known
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return out, known
+	}
+	var payload trade2StatsResp
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return out, known
+	}
+	for _, g := range payload.Result {
+		for _, e := range g.Entries {
+			if !strings.Contains(e.ID, ".stat_") {
+				continue
+			}
+			known[e.ID] = struct{}{}
+			n := normalizeLine(e.Text)
+			if statID, ok := exactMap[n]; ok {
+				out[e.ID] = statID
+				continue
+			}
+			if statID := findStatID(n, exactMap, patterns); statID != "" {
+				out[e.ID] = statID
+			}
+		}
+	}
+	return out, known
 }
 
 func nullableStr(s string) any {

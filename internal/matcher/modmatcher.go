@@ -224,7 +224,50 @@ func findStatID(norm string, exact map[string]string, pats []statPattern) string
 			return p.StatID
 		}
 	}
+
+	baseTokens := tokenSet(norm)
+	bestID := ""
+	bestScore := 0.0
+	for _, p := range pats {
+		s := jaccard(baseTokens, tokenSet(p.Norm))
+		if s > bestScore {
+			bestScore = s
+			bestID = p.StatID
+		}
+	}
+	if bestScore >= 0.50 {
+		return bestID
+	}
 	return ""
+}
+
+func tokenSet(s string) map[string]struct{} {
+	parts := strings.Fields(s)
+	out := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		if p == "#" || p == "to" || p == "of" || p == "and" || len(p) < 2 {
+			continue
+		}
+		out[p] = struct{}{}
+	}
+	return out
+}
+
+func jaccard(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for k := range a {
+		if _, ok := b[k]; ok {
+			inter++
+		}
+	}
+	union := len(a) + len(b) - inter
+	if union <= 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
 }
 
 func loadModsByStat(ctx context.Context, db *sql.DB) (map[string][]modMeta, error) {

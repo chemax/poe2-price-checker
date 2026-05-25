@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -99,8 +100,13 @@ RETURNING id`, slug).Scan(&id)
 }
 
 func upsertItem(ctx context.Context, tx *sql.Tx, in Item) (int64, error) {
+	resolvedBaseID, err := resolveBaseItemID(ctx, tx, in)
+	if err != nil {
+		return 0, err
+	}
+
 	var id int64
-	err := tx.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 INSERT INTO market.items(
  trade_item_id,ref_base_item_id,rarity,item_level,identified,corrupted,mirrored,sockets,properties,requirements,payload,updated_at
 ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
@@ -110,10 +116,31 @@ ON CONFLICT (trade_item_id) DO UPDATE SET
  sockets=EXCLUDED.sockets,properties=EXCLUDED.properties,requirements=EXCLUDED.requirements,payload=EXCLUDED.payload,
  updated_at=NOW()
 RETURNING id`,
-		in.TradeItemID, in.RefBaseItemID, in.Rarity, in.ItemLevel, in.Identified, in.Corrupted, in.Mirrored,
+		in.TradeItemID, resolvedBaseID, in.Rarity, in.ItemLevel, in.Identified, in.Corrupted, in.Mirrored,
 		in.Sockets, in.Properties, in.Requirements, in.Payload,
 	).Scan(&id)
 	return id, err
+}
+
+func resolveBaseItemID(ctx context.Context, tx *sql.Tx, in Item) (*string, error) {
+	if in.RefBaseItemID == nil || strings.TrimSpace(*in.RefBaseItemID) == "" {
+		return nil, nil
+	}
+	baseName := strings.TrimSpace(*in.RefBaseItemID)
+	var id string
+	err := tx.QueryRowContext(ctx, `
+SELECT id
+FROM ref.base_items
+WHERE name = $1
+ORDER BY id
+LIMIT 1`, baseName).Scan(&id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &id, nil
 }
 
 func replaceItemMods(ctx context.Context, tx *sql.Tx, itemID int64, mods []ItemMod) error {

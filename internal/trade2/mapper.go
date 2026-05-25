@@ -49,7 +49,7 @@ func MapTradeEntryToListing(raw json.RawMessage, league string) (market.Listing,
 
 	x := jsonIntPtr(itemObj["x"])
 	y := jsonIntPtr(itemObj["y"])
-	var baseID *string
+	baseID := jsonStringPtr(itemObj["baseType"])
 
 	mods := collectMods(itemObj)
 	rarity := jsonStringPtr(itemObj["rarity"])

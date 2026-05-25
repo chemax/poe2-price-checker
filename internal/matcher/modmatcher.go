@@ -25,8 +25,10 @@ type statEntry struct {
 }
 
 type modMeta struct {
-	ModID string
-	Stats []statEntry
+	ModID          string
+	Stats          []statEntry
+	GenerationType string
+	Domain         string
 }
 
 type statPattern struct {
@@ -85,7 +87,7 @@ ORDER BY item_id, sort_order`)
 			continue
 		}
 
-		mod := pickBestCandidate(candidates, rollRaw)
+		mod := pickBestCandidate(candidates, modType, rollRaw)
 		rollPcts := computeRollPcts(mod.Stats, rollRaw)
 		rollPctsJSON, _ := json.Marshal(rollPcts)
 		if _, err := m.db.ExecContext(ctx, `
@@ -105,15 +107,15 @@ WHERE item_id=$4 AND mod_type=$5 AND sort_order=$6`,
 	return fmt.Sprintf("mod matcher: total=%d matched=%d unmatched=%d matched_pct=%.2f", st.Total, st.Matched, st.Unmatched, percent(st.Matched, st.Total)), nil
 }
 
-func pickBestCandidate(cands []modMeta, rollRaw []byte) modMeta {
+func pickBestCandidate(cands []modMeta, modType string, rollRaw []byte) modMeta {
 	if len(cands) == 1 {
 		return cands[0]
 	}
 	rolls := parseRolls(rollRaw)
 	best := cands[0]
-	bestScore := scoreCandidate(best, rolls)
+	bestScore := scoreCandidate(best, modType, rolls)
 	for _, c := range cands[1:] {
-		s := scoreCandidate(c, rolls)
+		s := scoreCandidate(c, modType, rolls)
 		if s > bestScore || (s == bestScore && c.ModID < best.ModID) {
 			best = c
 			bestScore = s
@@ -122,7 +124,7 @@ func pickBestCandidate(cands []modMeta, rollRaw []byte) modMeta {
 	return best
 }
 
-func scoreCandidate(c modMeta, rolls []float64) float64 {
+func scoreCandidate(c modMeta, modType string, rolls []float64) float64 {
 	if len(rolls) == 0 {
 		return -float64(len(c.Stats))
 	}
@@ -146,7 +148,37 @@ func scoreCandidate(c modMeta, rolls []float64) float64 {
 	if len(c.Stats) == len(rolls) {
 		score += 0.5
 	}
+	score += modTypeBonus(modType, c)
 	return score
+}
+
+func modTypeBonus(modType string, c modMeta) float64 {
+	switch modType {
+	case "desecrated":
+		if c.Domain == "desecrated" {
+			return 2.0
+		}
+		return -0.5
+	case "explicit":
+		switch c.GenerationType {
+		case "prefix", "suffix", "unique", "corrupted", "essence", "talisman":
+			return 0.5
+		default:
+			return -0.2
+		}
+	case "implicit":
+		if c.GenerationType == "prefix" || c.GenerationType == "suffix" {
+			return -0.3
+		}
+		return 0.1
+	case "rune":
+		if strings.Contains(strings.ToLower(c.ModID), "rune") {
+			return 0.6
+		}
+		return -0.1
+	default:
+		return 0
+	}
 }
 
 func setUnmatched(ctx context.Context, db *sql.DB, itemID int64, modType string, sortOrder int) error {
@@ -196,23 +228,23 @@ func findStatID(norm string, exact map[string]string, pats []statPattern) string
 }
 
 func loadModsByStat(ctx context.Context, db *sql.DB) (map[string][]modMeta, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, stats FROM ref.mods`)
+	rows, err := db.QueryContext(ctx, `SELECT id, stats, generation_type, domain FROM ref.mods`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := map[string][]modMeta{}
 	for rows.Next() {
-		var modID string
+		var modID, generationType, domain string
 		var statsRaw []byte
-		if err := rows.Scan(&modID, &statsRaw); err != nil {
+		if err := rows.Scan(&modID, &statsRaw, &generationType, &domain); err != nil {
 			return nil, err
 		}
 		var stats []statEntry
 		if err := json.Unmarshal(statsRaw, &stats); err != nil || len(stats) == 0 {
 			continue
 		}
-		meta := modMeta{ModID: modID, Stats: stats}
+		meta := modMeta{ModID: modID, Stats: stats, GenerationType: generationType, Domain: domain}
 		for _, s := range stats {
 			out[s.ID] = append(out[s.ID], meta)
 		}

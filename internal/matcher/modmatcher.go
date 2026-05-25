@@ -41,9 +41,9 @@ type matcherStats struct{ Total, Matched, Unmatched int }
 type itemHashes map[string]map[int]string // mod_type -> local index -> hash
 
 const (
-	minStatSimilarity = 0.75
-	minCandidateScore = 0.75
-	minCandidateGap   = 0.05
+	minStatSimilarity = 0.70
+	minCandidateScore = 0.68
+	minCandidateGap   = 0.01
 )
 
 func (m *ModMatcher) Run(ctx context.Context) (string, error) {
@@ -51,7 +51,7 @@ func (m *ModMatcher) Run(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	hashToStatID, hashKnown, err := loadTrade2HashMapFromDB(ctx, m.db)
+	hashToStatID, hashTradeText, hashKnown, err := loadTrade2HashMapFromDB(ctx, m.db)
 	if err != nil {
 		return "", err
 	}
@@ -115,7 +115,7 @@ ORDER BY im.item_id, im.mod_type, im.sort_order`)
 			}
 		}
 		if statID == "" && len(hashPool) > 0 {
-			if s, h := pickStatByHashPool(hashPool, hashToStatID, modsByStat, modType, rollRaw); s != "" {
+			if s, h := pickStatByHashPool(hashPool, hashToStatID, hashTradeText, modsByStat, modType, norm, rollRaw); s != "" {
 				statID = s
 				hash = h
 				mappedByHash = true
@@ -272,33 +272,39 @@ func extractItemHashes(payloadRaw []byte) itemHashes {
 	return out
 }
 
-func loadTrade2HashMapFromDB(ctx context.Context, db *sql.DB) (map[string]string, map[string]struct{}, error) {
+func loadTrade2HashMapFromDB(ctx context.Context, db *sql.DB) (map[string]string, map[string]string, map[string]struct{}, error) {
 	out := map[string]string{}
+	trade := map[string]string{}
 	known := map[string]struct{}{}
-	rows, err := db.QueryContext(ctx, `SELECT hash_id, stat_id FROM ref.trade2_stats`)
+	rows, err := db.QueryContext(ctx, `SELECT hash_id, stat_id, trade_text FROM ref.trade2_stats`)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var hash string
 		var statID sql.NullString
-		if err := rows.Scan(&hash, &statID); err != nil {
-			return nil, nil, err
+		var tradeText sql.NullString
+		if err := rows.Scan(&hash, &statID, &tradeText); err != nil {
+			return nil, nil, nil, err
 		}
 		known[hash] = struct{}{}
+		if tradeText.Valid && strings.TrimSpace(tradeText.String) != "" {
+			trade[hash] = normalizeLine(tradeText.String)
+		}
 		if statID.Valid && strings.TrimSpace(statID.String) != "" {
 			out[hash] = statID.String
 		}
 	}
-	return out, known, rows.Err()
+	return out, trade, known, rows.Err()
 }
 
-func pickStatByHashPool(hashPool []string, hashToStatID map[string]string, modsByStat map[string][]modMeta, modType string, rollRaw []byte) (string, string) {
+func pickStatByHashPool(hashPool []string, hashToStatID map[string]string, hashTradeText map[string]string, modsByStat map[string][]modMeta, modType string, normLine string, rollRaw []byte) (string, string) {
 	rolls := parseRolls(rollRaw)
 	bestStat := ""
 	bestHash := ""
 	bestScore := -1e9
+	lineTokens := tokenSet(normLine)
 	for _, h := range hashPool {
 		statID, ok := hashToStatID[h]
 		if !ok || strings.TrimSpace(statID) == "" {
@@ -316,6 +322,9 @@ func pickStatByHashPool(hashPool []string, hashToStatID map[string]string, modsB
 				cand = c
 				score = s
 			}
+		}
+		if tt, ok := hashTradeText[h]; ok && strings.TrimSpace(tt) != "" {
+			score += jaccard(lineTokens, tokenSet(tt))
 		}
 		if score > bestScore {
 			bestScore = score

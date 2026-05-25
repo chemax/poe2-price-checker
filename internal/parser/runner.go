@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,7 +83,7 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *market.Repository, queries []runtimeQuery, h *workerHealth) {
-	cli := trade2.New("https://www.pathofexile.com", r.cfg.Parser.League, r.poesessid, newHTTPClient(wc.Proxy, r.cfg.Parser.RequestTimeout.Duration), wc)
+	cli := trade2.New("https://www.pathofexile.com", r.cfg.Parser.League, r.poesessid, getenvOrEmpty("CF_CLEARANCE"), newHTTPClient(wc.Proxy, r.cfg.Parser.RequestTimeout.Duration), wc)
 	ticker := time.NewTicker(r.cfg.Parser.PollInterval.Duration)
 	defer ticker.Stop()
 
@@ -238,6 +240,11 @@ func buildQueries(in []config.QueryConfig) ([]runtimeQuery, error) {
 		out = append(out, runtimeQuery{Name: name, Raw: b, Hash: hex.EncodeToString(h[:])})
 	}
 	return out, nil
+}
+
+func getenvOrEmpty(name string) string {
+	v := strings.TrimSpace(os.Getenv(name))
+	return v
 }
 
 func newHTTPClient(proxyAddr string, timeout time.Duration) *http.Client {

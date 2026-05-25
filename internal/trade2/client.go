@@ -17,13 +17,13 @@ import (
 )
 
 type Client struct {
-	baseURL    string
-	league     string
-	httpClient *http.Client
-	cookie     string
-	searchLim  *rate.Limiter
-	fetchLim   *rate.Limiter
-	retry      config.RetryConfig
+	baseURL      string
+	league       string
+	httpClient   *http.Client
+	cookieHeader string
+	searchLim    *rate.Limiter
+	fetchLim     *rate.Limiter
+	retry        config.RetryConfig
 }
 
 type SearchResponse struct {
@@ -35,15 +35,19 @@ type FetchResponse struct {
 	Result []json.RawMessage `json:"result"`
 }
 
-func New(baseURL, league, poesessid string, httpClient *http.Client, w config.WorkerConfig) *Client {
+func New(baseURL, league, poesessid, cfClearance string, httpClient *http.Client, w config.WorkerConfig) *Client {
+	cookieHeader := "POESESSID=" + poesessid
+	if strings.TrimSpace(cfClearance) != "" {
+		cookieHeader += "; cf_clearance=" + strings.TrimSpace(cfClearance)
+	}
 	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		league:     league,
-		httpClient: httpClient,
-		cookie:     poesessid,
-		searchLim:  rate.NewLimiter(rate.Limit(w.RateLimit.SearchRPS), w.RateLimit.SearchBurst),
-		fetchLim:   rate.NewLimiter(rate.Limit(w.RateLimit.FetchRPS), w.RateLimit.FetchBurst),
-		retry:      w.Retry,
+		baseURL:      strings.TrimRight(baseURL, "/"),
+		league:       league,
+		httpClient:   httpClient,
+		cookieHeader: cookieHeader,
+		searchLim:    rate.NewLimiter(rate.Limit(w.RateLimit.SearchRPS), w.RateLimit.SearchBurst),
+		fetchLim:     rate.NewLimiter(rate.Limit(w.RateLimit.FetchRPS), w.RateLimit.FetchBurst),
+		retry:        w.Retry,
 	}
 }
 
@@ -56,7 +60,7 @@ func (c *Client) Search(ctx context.Context, query json.RawMessage) (SearchRespo
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Cookie", "POESESSID="+c.cookie)
+		req.Header.Set("Cookie", c.cookieHeader)
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			return err
@@ -85,7 +89,7 @@ func (c *Client) Fetch(ctx context.Context, queryID string, itemIDs []string) (F
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Cookie", "POESESSID="+c.cookie)
+		req.Header.Set("Cookie", c.cookieHeader)
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			return err

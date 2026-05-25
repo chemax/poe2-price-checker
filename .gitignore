@@ -1,6 +1,34 @@
+# Secrets / local env
 .env
 .env.*
 !.env.example
+
+# Local runtime config overrides
 config.yaml
+config.local.yaml
+config.*.local.yaml
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Build/test artifacts
 bin/
+dist/
 coverage.out
+*.test
+
+# Local DB / logs / temp
+*.db
+*.sqlite
+*.sqlite3
+*.log
+tmp/
+
+# Local data dumps (keep curated project JSON tracked)
+*.dump.json
+*.local.json

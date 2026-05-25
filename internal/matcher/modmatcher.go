@@ -40,6 +40,12 @@ type matcherStats struct{ Total, Matched, Unmatched int }
 
 type itemHashes map[string]map[int]string // mod_type -> local index -> hash
 
+const (
+	minStatSimilarity = 0.75
+	minCandidateScore = 0.75
+	minCandidateGap   = 0.05
+)
+
 func (m *ModMatcher) Run(ctx context.Context) (string, error) {
 	exactMap, patterns, err := loadStatPatterns(ctx, m.db)
 	if err != nil {
@@ -317,7 +323,7 @@ func pickStatByHashPool(hashPool []string, hashToStatID map[string]string, modsB
 			bestHash = h
 		}
 	}
-	if bestScore < 0.85 {
+	if bestScore < minCandidateScore {
 		return "", ""
 	}
 	return bestStat, bestHash
@@ -332,7 +338,7 @@ func nullableStr(s string) any {
 
 func pickBestCandidate(cands []modMeta, modType string, rollRaw []byte) (modMeta, bool) {
 	if len(cands) == 1 {
-		if scoreCandidate(cands[0], modType, parseRolls(rollRaw)) < 0.85 {
+		if scoreCandidate(cands[0], modType, parseRolls(rollRaw)) < minCandidateScore {
 			return modMeta{}, false
 		}
 		return cands[0], true
@@ -352,10 +358,10 @@ func pickBestCandidate(cands []modMeta, modType string, rollRaw []byte) (modMeta
 			bestScore = s
 		}
 	}
-	if bestScore < 0.85 {
+	if bestScore < minCandidateScore {
 		return modMeta{}, false
 	}
-	if second > -1e8 && (bestScore-second) < 0.05 {
+	if second > -1e8 && (bestScore-second) < minCandidateGap {
 		return modMeta{}, false
 	}
 	return best, true
@@ -509,7 +515,7 @@ func findStatID(norm string, exact map[string]string, pats []statPattern) string
 			secondScore = s
 		}
 	}
-	if bestScore >= 0.85 && (bestScore-secondScore) >= 0.05 {
+	if bestScore >= minStatSimilarity && (bestScore-secondScore) >= minCandidateGap {
 		return bestID
 	}
 	return ""

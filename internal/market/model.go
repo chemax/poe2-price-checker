@@ -31,6 +31,7 @@ type Listing struct {
 	AccountName    *string
 	PriceCurrency  *string
 	PriceAmount    *string
+	PriceDivine    *string
 	IndexedAt      *string
 	Whisper        *string
 	StashName      *string

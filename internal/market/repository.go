@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -49,16 +50,21 @@ func (r *Repository) UpsertListing(ctx context.Context, in Listing) error {
 		return err
 	}
 
+	priceDivine, err := resolvePriceDivine(ctx, tx, in.PriceCurrency, in.PriceAmount, in.IndexedAt)
+	if err != nil {
+		return err
+	}
+
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO market.listings(
-  trade_listing_id,item_id,league_id,account_name,price_currency,price_amount,indexed_at,whisper,stash_name,position_x,position_y,payload,seen_at,updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())
+  trade_listing_id,item_id,league_id,account_name,price_currency,price_amount,price_divine,indexed_at,whisper,stash_name,position_x,position_y,payload,seen_at,first_seen_at,last_seen_at,seen_count,updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW(),NOW(),1,NOW())
 ON CONFLICT (trade_listing_id) DO UPDATE SET
   item_id=EXCLUDED.item_id, league_id=EXCLUDED.league_id, account_name=EXCLUDED.account_name,
-  price_currency=EXCLUDED.price_currency, price_amount=EXCLUDED.price_amount, indexed_at=EXCLUDED.indexed_at,
+  price_currency=EXCLUDED.price_currency, price_amount=EXCLUDED.price_amount, price_divine=EXCLUDED.price_divine, indexed_at=EXCLUDED.indexed_at,
   whisper=EXCLUDED.whisper, stash_name=EXCLUDED.stash_name, position_x=EXCLUDED.position_x, position_y=EXCLUDED.position_y,
-  payload=EXCLUDED.payload, seen_at=NOW(), updated_at=NOW()`,
-		in.TradeListingID, itemID, leagueID, in.AccountName, in.PriceCurrency, in.PriceAmount, ParseTimePtrRFC3339(in.IndexedAt),
+  payload=EXCLUDED.payload, seen_at=NOW(), last_seen_at=NOW(), seen_count=market.listings.seen_count+1, updated_at=NOW()`,
+		in.TradeListingID, itemID, leagueID, in.AccountName, in.PriceCurrency, in.PriceAmount, priceDivine, ParseTimePtrRFC3339(in.IndexedAt),
 		in.Whisper, in.StashName, in.PositionX, in.PositionY, in.Payload,
 	)
 	if err != nil {
@@ -127,6 +133,47 @@ VALUES($1,$2,$3,$4,$5,$6)`, itemID, m.ModID, m.ModType, m.LineText, m.RollValues
 		}
 	}
 	return nil
+}
+
+func resolvePriceDivine(ctx context.Context, tx *sql.Tx, currency, amount, indexedAt *string) (any, error) {
+	if currency == nil || amount == nil || *currency == "" || *amount == "" {
+		return nil, nil
+	}
+	if *currency == "divine" {
+		return *amount, nil
+	}
+
+	at := time.Now().UTC()
+	if parsed := ParseTimePtrRFC3339(indexedAt); parsed != nil {
+		if t, ok := parsed.(time.Time); ok {
+			at = t.UTC()
+		}
+	}
+
+	var rate string
+	err := tx.QueryRowContext(ctx, `
+SELECT divine_value::text
+FROM market.currency_rates
+WHERE currency=$1 AND fetched_at <= $2
+ORDER BY fetched_at DESC
+LIMIT 1`, *currency, at).Scan(&rate)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	amt, err := strconv.ParseFloat(*amount, 64)
+	if err != nil {
+		return nil, nil
+	}
+	r, err := strconv.ParseFloat(rate, 64)
+	if err != nil {
+		return nil, nil
+	}
+	v := amt * r
+	return strconv.FormatFloat(v, 'f', 8, 64), nil
 }
 
 func ParseTimePtrRFC3339(v *string) any {

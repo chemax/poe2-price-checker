@@ -92,6 +92,12 @@ ORDER BY im.item_id, im.mod_type, im.sort_order`)
 		idx := localIdx[modType]
 		localIdx[modType] = idx + 1
 		hash := currentHashes[modType][idx]
+		hashPool := make([]string, 0, len(currentHashes[modType]))
+		for _, h := range currentHashes[modType] {
+			if strings.TrimSpace(h) != "" {
+				hashPool = append(hashPool, h)
+			}
+		}
 
 		norm := normalizeLine(line)
 		statID := ""
@@ -99,6 +105,13 @@ ORDER BY im.item_id, im.mod_type, im.sort_order`)
 		if hash != "" {
 			if s, ok := hashToStatID[hash]; ok {
 				statID = s
+				mappedByHash = true
+			}
+		}
+		if statID == "" && len(hashPool) > 0 {
+			if s, h := pickStatByHashPool(hashPool, hashToStatID, modsByStat, modType, rollRaw); s != "" {
+				statID = s
+				hash = h
 				mappedByHash = true
 			}
 		}
@@ -218,6 +231,38 @@ func extractItemHashes(payloadRaw []byte) itemHashes {
 		}
 		out[t] = m
 	}
+
+	// Fallback/override path: derive hash from extended.mods[*].magnitudes[*].hash
+	// This is more reliable for explicit/implicit/desecrated/enchant when
+	// extended.hashes index mapping is ambiguous.
+	modsRaw, ok := ext["mods"]
+	if !ok {
+		return out
+	}
+	var modsByType map[string][]struct {
+		Magnitudes []struct {
+			Hash string `json:"hash"`
+		} `json:"magnitudes"`
+	}
+	if err := json.Unmarshal(modsRaw, &modsByType); err != nil {
+		return out
+	}
+	for modType, mods := range modsByType {
+		if out[modType] == nil {
+			out[modType] = map[int]string{}
+		}
+		for idx, md := range mods {
+			for _, mag := range md.Magnitudes {
+				h := strings.TrimSpace(mag.Hash)
+				if h == "" {
+					continue
+				}
+				// prefer magnitude-derived hash for deterministic line binding
+				out[modType][idx] = h
+				break
+			}
+		}
+	}
 	return out
 }
 
@@ -241,6 +286,41 @@ func loadTrade2HashMapFromDB(ctx context.Context, db *sql.DB) (map[string]string
 		}
 	}
 	return out, known, rows.Err()
+}
+
+func pickStatByHashPool(hashPool []string, hashToStatID map[string]string, modsByStat map[string][]modMeta, modType string, rollRaw []byte) (string, string) {
+	rolls := parseRolls(rollRaw)
+	bestStat := ""
+	bestHash := ""
+	bestScore := -1e9
+	for _, h := range hashPool {
+		statID, ok := hashToStatID[h]
+		if !ok || strings.TrimSpace(statID) == "" {
+			continue
+		}
+		cands := modsByStat[statID]
+		if len(cands) == 0 {
+			continue
+		}
+		cand := cands[0]
+		score := scoreCandidate(cand, modType, rolls)
+		for _, c := range cands[1:] {
+			s := scoreCandidate(c, modType, rolls)
+			if s > score || (s == score && c.ModID < cand.ModID) {
+				cand = c
+				score = s
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			bestStat = statID
+			bestHash = h
+		}
+	}
+	if bestScore < 0.85 {
+		return "", ""
+	}
+	return bestStat, bestHash
 }
 
 func nullableStr(s string) any {

@@ -123,6 +123,10 @@ func fetchTrade2Stats(ctx context.Context) (payload, error) {
 }
 
 func loadStatPatterns(ctx context.Context, db *sql.DB) (map[string]string, []statPattern, error) {
+	valid, err := loadValidModStatIDs(ctx, db)
+	if err != nil {
+		return nil, nil, err
+	}
 	rows, err := db.QueryContext(ctx, `SELECT stat_id, english_text FROM ref.stat_translations WHERE english_text IS NOT NULL AND english_text <> ''`)
 	if err != nil {
 		return nil, nil, err
@@ -134,6 +138,9 @@ func loadStatPatterns(ctx context.Context, db *sql.DB) (map[string]string, []sta
 		var statID, text string
 		if err := rows.Scan(&statID, &text); err != nil {
 			return nil, nil, err
+		}
+		if _, ok := valid[statID]; !ok {
+			continue
 		}
 		n := normalizeLine(text)
 		if n == "" {
@@ -148,6 +155,33 @@ func loadStatPatterns(ctx context.Context, db *sql.DB) (map[string]string, []sta
 	return exact, patterns, rows.Err()
 }
 
+func loadValidModStatIDs(ctx context.Context, db *sql.DB) (map[string]struct{}, error) {
+	rows, err := db.QueryContext(ctx, `SELECT stats FROM ref.mods`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var statsRaw []byte
+		if err := rows.Scan(&statsRaw); err != nil {
+			return nil, err
+		}
+		var arr []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(statsRaw, &arr); err != nil {
+			continue
+		}
+		for _, s := range arr {
+			if strings.TrimSpace(s.ID) != "" {
+				out[s.ID] = struct{}{}
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
 func findStatID(norm string, exact map[string]string, pats []statPattern) string {
 	if v, ok := exact[norm]; ok {
 		return v
@@ -156,6 +190,19 @@ func findStatID(norm string, exact map[string]string, pats []statPattern) string
 		if strings.Contains(norm, p.Norm) || strings.Contains(p.Norm, norm) {
 			return p.StatID
 		}
+	}
+	base := tokenSet(norm)
+	bestID := ""
+	best := 0.0
+	for _, p := range pats {
+		s := jaccard(base, tokenSet(p.Norm))
+		if s > best {
+			best = s
+			bestID = p.StatID
+		}
+	}
+	if best >= 0.50 {
+		return bestID
 	}
 	return ""
 }
@@ -175,8 +222,46 @@ func normalizeLine(s string) string {
 	s = reNumber.ReplaceAllString(s, "#")
 	s = strings.ReplaceAll(s, "%", "")
 	s = strings.ReplaceAll(s, "+", "")
+	repl := map[string]string{
+		"critical hit chance":   "critical strike chance",
+		"critical damage bonus": "critical strike multiplier",
+		"stun buildup":          "stun",
+		"leeches":               "leech",
+	}
+	for k, v := range repl {
+		s = strings.ReplaceAll(s, k, v)
+	}
 	s = reSpaces.ReplaceAllString(strings.TrimSpace(s), " ")
 	return s
+}
+
+func tokenSet(s string) map[string]struct{} {
+	parts := strings.Fields(s)
+	out := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		if p == "#" || p == "to" || p == "of" || p == "and" || len(p) < 2 {
+			continue
+		}
+		out[p] = struct{}{}
+	}
+	return out
+}
+
+func jaccard(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for k := range a {
+		if _, ok := b[k]; ok {
+			inter++
+		}
+	}
+	union := len(a) + len(b) - inter
+	if union <= 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
 }
 
 func nullable(s string) any {

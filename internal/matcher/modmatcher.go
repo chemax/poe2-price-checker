@@ -322,6 +322,10 @@ WHERE item_id=$1 AND mod_type=$2 AND sort_order=$3`, itemID, modType, sortOrder,
 }
 
 func loadStatPatterns(ctx context.Context, db *sql.DB) (map[string]string, []statPattern, error) {
+	valid, err := loadValidModStatIDs(ctx, db)
+	if err != nil {
+		return nil, nil, err
+	}
 	rows, err := db.QueryContext(ctx, `SELECT stat_id, english_text FROM ref.stat_translations WHERE english_text IS NOT NULL AND english_text <> ''`)
 	if err != nil {
 		return nil, nil, err
@@ -334,6 +338,9 @@ func loadStatPatterns(ctx context.Context, db *sql.DB) (map[string]string, []sta
 		if err := rows.Scan(&statID, &text); err != nil {
 			return nil, nil, err
 		}
+		if _, ok := valid[statID]; !ok {
+			continue
+		}
 		n := normalizeLine(text)
 		if n == "" {
 			continue
@@ -345,6 +352,33 @@ func loadStatPatterns(ctx context.Context, db *sql.DB) (map[string]string, []sta
 	}
 	sort.Slice(patterns, func(i, j int) bool { return len(patterns[i].Norm) > len(patterns[j].Norm) })
 	return exact, patterns, rows.Err()
+}
+
+func loadValidModStatIDs(ctx context.Context, db *sql.DB) (map[string]struct{}, error) {
+	rows, err := db.QueryContext(ctx, `SELECT stats FROM ref.mods`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var statsRaw []byte
+		if err := rows.Scan(&statsRaw); err != nil {
+			return nil, err
+		}
+		var arr []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(statsRaw, &arr); err != nil {
+			continue
+		}
+		for _, s := range arr {
+			if strings.TrimSpace(s.ID) != "" {
+				out[s.ID] = struct{}{}
+			}
+		}
+	}
+	return out, rows.Err()
 }
 
 func findStatID(norm string, exact map[string]string, pats []statPattern) string {
@@ -443,11 +477,23 @@ var (
 func normalizeLine(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.ReplaceAll(s, "\n", " ")
+	if i := strings.Index(s, ":"); i >= 0 && i < 40 {
+		s = strings.TrimSpace(s[i+1:])
+	}
 	s = reBracket.ReplaceAllString(s, `$2`)
 	s = reParam.ReplaceAllString(s, "#")
 	s = reNumber.ReplaceAllString(s, "#")
 	s = strings.ReplaceAll(s, "%", "")
 	s = strings.ReplaceAll(s, "+", "")
+	repl := map[string]string{
+		"critical hit chance":   "critical strike chance",
+		"critical damage bonus": "critical strike multiplier",
+		"stun buildup":          "stun",
+		"leeches":               "leech",
+	}
+	for k, v := range repl {
+		s = strings.ReplaceAll(s, k, v)
+	}
 	s = reSpaces.ReplaceAllString(strings.TrimSpace(s), " ")
 	return s
 }

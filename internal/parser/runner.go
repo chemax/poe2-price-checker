@@ -21,6 +21,7 @@ import (
 	"golang.org/x/net/proxy"
 	"poe2-price-checker/internal/config"
 	"poe2-price-checker/internal/market"
+	"poe2-price-checker/internal/pricing"
 	"poe2-price-checker/internal/trade2"
 )
 
@@ -54,6 +55,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer db.Close()
 
 	repo := market.NewRepository(db)
+	pricing.StartAutoSync(ctx, db, r.cfg.Parser.League, r.poesessid, getenvOrEmpty("CF_CLEARANCE"), 10*time.Minute)
 	queries, err := buildQueries(r.cfg.Parser.Queries)
 	if err != nil {
 		return err

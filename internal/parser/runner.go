@@ -145,6 +145,17 @@ func (r *Runner) runWorkerHealthLogger(ctx context.Context, h *workerHealth) {
 	}
 }
 
+func isTooOld(indexedAt *string, maxAge time.Duration) bool {
+	if maxAge <= 0 || indexedAt == nil || *indexedAt == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, *indexedAt)
+	if err != nil {
+		return false
+	}
+	return time.Since(t) > maxAge
+}
+
 func formatUnix(unix int64) string {
 	if unix <= 0 {
 		return "never"
@@ -169,7 +180,8 @@ func (r *Runner) runCycle(ctx context.Context, cli *trade2.Client, wc config.Wor
 	}
 
 	const fetchBatchSize = 10
-	var fetched, saved, parseErrs, saveErrs int
+	var fetched, saved, parseErrs, saveErrs, oldSkipped int
+	stopByAge := false
 	for _, batch := range chunkStrings(ids, fetchBatchSize) {
 		fr, ferr := cli.Fetch(ctx, sr.ID, batch)
 		if ferr != nil {
@@ -182,15 +194,23 @@ func (r *Runner) runCycle(ctx context.Context, cli *trade2.Client, wc config.Wor
 				parseErrs++
 				continue
 			}
+			if isTooOld(lst.IndexedAt, r.cfg.Parser.MaxListingAge.Duration) {
+				oldSkipped++
+				stopByAge = true
+				break
+			}
 			if serr := repo.UpsertListing(ctx, lst); serr != nil {
 				saveErrs++
 				continue
 			}
 			saved++
 		}
+		if stopByAge {
+			break
+		}
 	}
 
-	log.Printf("worker=%s query=%s search_ids=%d fetched=%d saved=%d parse_err=%d save_err=%d", wc.Name, query.Name, len(ids), fetched, saved, parseErrs, saveErrs)
+	log.Printf("worker=%s query=%s search_ids=%d fetched=%d saved=%d parse_err=%d save_err=%d old_skipped=%d stop_by_age=%t", wc.Name, query.Name, len(ids), fetched, saved, parseErrs, saveErrs, oldSkipped, stopByAge)
 	return nil
 }
 

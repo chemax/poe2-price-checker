@@ -12,6 +12,7 @@ parser:
   league: "Standard"
   poll_interval: "2s"
   request_timeout: "15s"
+  max_listing_age: "720h" # 30 days; 0 = disabled
 
   queries:
     - name: "online_cheap"

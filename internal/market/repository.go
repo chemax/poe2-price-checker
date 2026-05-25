@@ -7,11 +7,27 @@ import (
 	"time"
 )
 
+func (r *Repository) InsertSearchRun(ctx context.Context, leagueSlug, queryName, queryID, queryHash string, responsePayload []byte) error {
+	leagueID, err := r.EnsureLeague(ctx, leagueSlug)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `
+INSERT INTO market.search_runs(league_id,query_name,query_id,query_hash,requested_at,response_payload)
+VALUES($1,$2,$3,$4,NOW(),$5)
+`, leagueID, queryName, queryID, queryHash, responsePayload)
+	return err
+}
+
 type Repository struct {
 	db *sql.DB
 }
 
 func NewRepository(db *sql.DB) *Repository { return &Repository{db: db} }
+
+func (r *Repository) EnsureLeague(ctx context.Context, slug string) (int64, error) {
+	return ensureLeagueDB(ctx, r.db, slug)
+}
 
 func (r *Repository) UpsertListing(ctx context.Context, in Listing) error {
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -58,6 +74,18 @@ func ensureLeague(ctx context.Context, tx *sql.Tx, slug string) (int64, error) {
 	}
 	var id int64
 	err := tx.QueryRowContext(ctx, `
+INSERT INTO market.leagues(slug) VALUES($1)
+ON CONFLICT (slug) DO UPDATE SET is_active=TRUE
+RETURNING id`, slug).Scan(&id)
+	return id, err
+}
+
+func ensureLeagueDB(ctx context.Context, db *sql.DB, slug string) (int64, error) {
+	if slug == "" {
+		return 0, fmt.Errorf("league slug is required")
+	}
+	var id int64
+	err := db.QueryRowContext(ctx, `
 INSERT INTO market.leagues(slug) VALUES($1)
 ON CONFLICT (slug) DO UPDATE SET is_active=TRUE
 RETURNING id`, slug).Scan(&id)

@@ -2,7 +2,9 @@ package parser
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +27,12 @@ type Runner struct {
 }
 
 func New(cfg config.Config, poesessid string) *Runner { return &Runner{cfg: cfg, poesessid: poesessid} }
+
+type runtimeQuery struct {
+	Name string
+	Raw  json.RawMessage
+	Hash string
+}
 
 func (r *Runner) Run(ctx context.Context) error {
 	db, err := sql.Open("postgres", r.cfg.Postgres.DSN)
@@ -54,15 +62,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *market.Repository, queries []json.RawMessage) {
+func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *market.Repository, queries []runtimeQuery) {
 	cli := trade2.New("https://www.pathofexile.com", r.cfg.Parser.League, r.poesessid, newHTTPClient(wc.Proxy, r.cfg.Parser.RequestTimeout.Duration), wc)
 	ticker := time.NewTicker(r.cfg.Parser.PollInterval.Duration)
 	defer ticker.Stop()
 
 	for {
-		for i, query := range queries {
+		for _, query := range queries {
 			if err := r.runCycle(ctx, cli, wc, repo, query); err != nil {
-				log.Printf("worker=%s query=%d cycle error: %v", wc.Name, i, err)
+				log.Printf("worker=%s query=%s cycle error: %v", wc.Name, query.Name, err)
 				t := time.NewTimer(wc.Cooldown.Sleep.Duration)
 				select {
 				case <-ctx.Done():
@@ -80,13 +88,17 @@ func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *ma
 	}
 }
 
-func (r *Runner) runCycle(ctx context.Context, cli *trade2.Client, wc config.WorkerConfig, repo *market.Repository, query json.RawMessage) error {
-	sr, err := cli.Search(ctx, query)
+func (r *Runner) runCycle(ctx context.Context, cli *trade2.Client, wc config.WorkerConfig, repo *market.Repository, query runtimeQuery) error {
+	sr, err := cli.Search(ctx, query.Raw)
 	if err != nil {
 		return err
 	}
+	rawSearchResponse, _ := json.Marshal(sr)
+	if err := repo.InsertSearchRun(ctx, r.cfg.Parser.League, query.Name, sr.ID, query.Hash, rawSearchResponse); err != nil {
+		log.Printf("worker=%s query=%s search_run insert error: %v", wc.Name, query.Name, err)
+	}
 	if len(sr.Result) == 0 {
-		log.Printf("worker=%s empty search", wc.Name)
+		log.Printf("worker=%s query=%s empty search", wc.Name, query.Name)
 		return nil
 	}
 	ids := sr.Result
@@ -106,18 +118,23 @@ func (r *Runner) runCycle(ctx context.Context, cli *trade2.Client, wc config.Wor
 			log.Printf("worker=%s upsert error: %v", wc.Name, err)
 		}
 	}
-	log.Printf("worker=%s synced=%d", wc.Name, len(fr.Result))
+	log.Printf("worker=%s query=%s synced=%d", wc.Name, query.Name, len(fr.Result))
 	return nil
 }
 
-func buildQueries(in []config.QueryConfig) ([]json.RawMessage, error) {
-	out := make([]json.RawMessage, 0, len(in))
+func buildQueries(in []config.QueryConfig) ([]runtimeQuery, error) {
+	out := make([]runtimeQuery, 0, len(in))
 	for i, q := range in {
 		b, err := json.Marshal(q.Body)
 		if err != nil {
 			return nil, fmt.Errorf("marshal parser.queries[%d]: %w", i, err)
 		}
-		out = append(out, b)
+		name := q.Name
+		if name == "" {
+			name = fmt.Sprintf("query_%d", i+1)
+		}
+		h := sha256.Sum256(b)
+		out = append(out, runtimeQuery{Name: name, Raw: b, Hash: hex.EncodeToString(h[:])})
 	}
 	return out, nil
 }

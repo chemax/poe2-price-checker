@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/http"
-	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -47,7 +45,10 @@ func (m *ModMatcher) Run(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	hashToStatID, hashKnown := loadTrade2HashMap(ctx, exactMap, patterns)
+	hashToStatID, hashKnown, err := loadTrade2HashMapFromDB(ctx, m.db)
+	if err != nil {
+		return "", err
+	}
 	if err != nil {
 		return "", err
 	}
@@ -209,65 +210,26 @@ func extractItemHashes(payloadRaw []byte) itemHashes {
 	return out
 }
 
-type trade2StatsResp struct {
-	Result []struct {
-		Entries []struct {
-			ID   string `json:"id"`
-			Text string `json:"text"`
-		} `json:"entries"`
-	} `json:"result"`
-}
-
-func loadTrade2HashMap(ctx context.Context, exactMap map[string]string, patterns []statPattern) (map[string]string, map[string]struct{}) {
+func loadTrade2HashMapFromDB(ctx context.Context, db *sql.DB) (map[string]string, map[string]struct{}, error) {
 	out := map[string]string{}
 	known := map[string]struct{}{}
-
-	cookie := strings.TrimSpace(os.Getenv("POESESSID"))
-	cf := strings.TrimSpace(os.Getenv("CF_CLEARANCE"))
-	if cookie == "" || cf == "" {
-		return out, known
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.pathofexile.com/api/trade2/data/stats", nil)
+	rows, err := db.QueryContext(ctx, `SELECT hash_id, stat_id FROM ref.trade2_stats`)
 	if err != nil {
-		return out, known
+		return nil, nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", "https://www.pathofexile.com")
-	req.Header.Set("Referer", "https://www.pathofexile.com/trade2/search/poe2/Standard")
-	req.Header.Set("Cookie", "cf_clearance="+cf+"; POESESSID="+cookie)
-
-	resp, err := (&http.Client{}).Do(req)
-	if err != nil {
-		return out, known
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return out, known
-	}
-	var payload trade2StatsResp
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return out, known
-	}
-	for _, g := range payload.Result {
-		for _, e := range g.Entries {
-			if !strings.Contains(e.ID, ".stat_") {
-				continue
-			}
-			known[e.ID] = struct{}{}
-			n := normalizeLine(e.Text)
-			if statID, ok := exactMap[n]; ok {
-				out[e.ID] = statID
-				continue
-			}
-			if statID := findStatID(n, exactMap, patterns); statID != "" {
-				out[e.ID] = statID
-			}
+	defer rows.Close()
+	for rows.Next() {
+		var hash string
+		var statID sql.NullString
+		if err := rows.Scan(&hash, &statID); err != nil {
+			return nil, nil, err
+		}
+		known[hash] = struct{}{}
+		if statID.Valid && strings.TrimSpace(statID.String) != "" {
+			out[hash] = statID.String
 		}
 	}
-	return out, known
+	return out, known, rows.Err()
 }
 
 func nullableStr(s string) any {

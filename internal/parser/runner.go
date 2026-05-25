@@ -97,29 +97,68 @@ func (r *Runner) runCycle(ctx context.Context, cli *trade2.Client, wc config.Wor
 	if err := repo.InsertSearchRun(ctx, r.cfg.Parser.League, query.Name, sr.ID, query.Hash, rawSearchResponse); err != nil {
 		log.Printf("worker=%s query=%s search_run insert error: %v", wc.Name, query.Name, err)
 	}
-	if len(sr.Result) == 0 {
+
+	ids := uniqStrings(sr.Result)
+	if len(ids) == 0 {
 		log.Printf("worker=%s query=%s empty search", wc.Name, query.Name)
 		return nil
 	}
-	ids := sr.Result
-	if len(ids) > 10 {
-		ids = ids[:10]
+
+	const fetchBatchSize = 10
+	var fetched, saved, parseErrs, saveErrs int
+	for _, batch := range chunkStrings(ids, fetchBatchSize) {
+		fr, ferr := cli.Fetch(ctx, sr.ID, batch)
+		if ferr != nil {
+			return ferr
+		}
+		fetched += len(fr.Result)
+		for _, raw := range fr.Result {
+			lst, perr := trade2.MapTradeEntryToListing(raw, r.cfg.Parser.League)
+			if perr != nil {
+				parseErrs++
+				continue
+			}
+			if serr := repo.UpsertListing(ctx, lst); serr != nil {
+				saveErrs++
+				continue
+			}
+			saved++
+		}
 	}
-	fr, err := cli.Fetch(ctx, sr.ID, ids)
-	if err != nil {
-		return err
-	}
-	for _, raw := range fr.Result {
-		lst, err := trade2.MapTradeEntryToListing(raw, r.cfg.Parser.League)
-		if err != nil {
+
+	log.Printf("worker=%s query=%s search_ids=%d fetched=%d saved=%d parse_err=%d save_err=%d", wc.Name, query.Name, len(ids), fetched, saved, parseErrs, saveErrs)
+	return nil
+}
+
+func uniqStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
 			continue
 		}
-		if err := repo.UpsertListing(ctx, lst); err != nil {
-			log.Printf("worker=%s upsert error: %v", wc.Name, err)
+		if _, ok := seen[s]; ok {
+			continue
 		}
+		seen[s] = struct{}{}
+		out = append(out, s)
 	}
-	log.Printf("worker=%s query=%s synced=%d", wc.Name, query.Name, len(fr.Result))
-	return nil
+	return out
+}
+
+func chunkStrings(in []string, size int) [][]string {
+	if size <= 0 {
+		size = 1
+	}
+	out := make([][]string, 0, (len(in)+size-1)/size)
+	for i := 0; i < len(in); i += size {
+		j := i + size
+		if j > len(in) {
+			j = len(in)
+		}
+		out = append(out, in[i:j])
+	}
+	return out
 }
 
 func buildQueries(in []config.QueryConfig) ([]runtimeQuery, error) {

@@ -1,0 +1,47 @@
+env: dev
+
+postgres:
+  dsn: "postgres://user:pass@127.0.0.1:5432/poe2?sslmode=disable"
+
+ref_sync:
+  enabled: true
+  source_base_url: "https://repoe-fork.github.io/poe2"
+  schedule: "@every 6h"
+
+parser:
+  league: "Standard"
+  poll_interval: "2s"
+  request_timeout: "15s"
+
+  workers:
+    - name: "w1"
+      proxy: "" # empty => direct
+      rate_limit:
+        search_rps: 1.0
+        search_burst: 2
+        fetch_rps: 1.0
+        fetch_burst: 2
+      retry:
+        max_attempts: 5
+        base_backoff: "500ms"
+        max_backoff: "30s"
+        jitter: true
+      cooldown:
+        error_threshold: 8
+        sleep: "60s"
+
+    - name: "w2"
+      proxy: "socks5://127.0.0.1:9050"
+      rate_limit:
+        search_rps: 1.0
+        search_burst: 2
+        fetch_rps: 1.0
+        fetch_burst: 2
+      retry:
+        max_attempts: 5
+        base_backoff: "500ms"
+        max_backoff: "30s"
+        jitter: true
+      cooldown:
+        error_threshold: 8
+        sleep: "60s"

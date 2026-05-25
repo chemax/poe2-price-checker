@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
-	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"poe2-price-checker/internal/config"
+	"poe2-price-checker/internal/parser"
 )
 
 func main() {
@@ -17,14 +20,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	if cfg.Postgres.DSN == "" {
+		log.Fatal("postgres.dsn is required")
+	}
 
 	poeSessID := os.Getenv("POESESSID")
 	if poeSessID == "" {
 		log.Fatal("POESESSID is required (set via environment)")
 	}
 
-	fmt.Printf("parser bootstrap ok: league=%s workers=%d\n", cfg.Parser.League, len(cfg.Parser.Workers))
-	for _, w := range cfg.Parser.Workers {
-		fmt.Printf("worker=%s proxy=%q search_rps=%.2f fetch_rps=%.2f\n", w.Name, w.Proxy, w.RateLimit.SearchRPS, w.RateLimit.FetchRPS)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	r := parser.New(cfg, poeSessID)
+	if err := r.Run(ctx); err != nil {
+		log.Fatalf("parser run: %v", err)
 	}
 }

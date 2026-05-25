@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -13,9 +14,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-type ModMatcher struct {
-	db *sql.DB
-}
+type ModMatcher struct{ db *sql.DB }
 
 func NewModMatcher(db *sql.DB) *ModMatcher { return &ModMatcher{db: db} }
 
@@ -26,19 +25,19 @@ type statEntry struct {
 }
 
 type modMeta struct {
-	ModID  string
-	Stats  []statEntry
-	RawIDs map[string]struct{}
+	ModID string
+	Stats []statEntry
 }
 
-type matcherStats struct {
-	Total     int
-	Matched   int
-	Unmatched int
+type statPattern struct {
+	Norm   string
+	StatID string
 }
+
+type matcherStats struct{ Total, Matched, Unmatched int }
 
 func (m *ModMatcher) Run(ctx context.Context) (string, error) {
-	statTextToID, err := loadStatPatterns(ctx, m.db)
+	exactMap, patterns, err := loadStatPatterns(ctx, m.db)
 	if err != nil {
 		return "", err
 	}
@@ -68,8 +67,8 @@ ORDER BY item_id, sort_order`)
 		st.Total++
 
 		norm := normalizeLine(line)
-		statID, ok := statTextToID[norm]
-		if !ok {
+		statID := findStatID(norm, exactMap, patterns)
+		if statID == "" {
 			if err := setUnmatched(ctx, m.db, itemID, modType, sortOrder); err != nil {
 				return "", err
 			}
@@ -86,7 +85,7 @@ ORDER BY item_id, sort_order`)
 			continue
 		}
 
-		mod := candidates[0]
+		mod := pickBestCandidate(candidates, rollRaw)
 		rollPcts := computeRollPcts(mod.Stats, rollRaw)
 		rollPctsJSON, _ := json.Marshal(rollPcts)
 		if _, err := m.db.ExecContext(ctx, `
@@ -106,6 +105,50 @@ WHERE item_id=$4 AND mod_type=$5 AND sort_order=$6`,
 	return fmt.Sprintf("mod matcher: total=%d matched=%d unmatched=%d matched_pct=%.2f", st.Total, st.Matched, st.Unmatched, percent(st.Matched, st.Total)), nil
 }
 
+func pickBestCandidate(cands []modMeta, rollRaw []byte) modMeta {
+	if len(cands) == 1 {
+		return cands[0]
+	}
+	rolls := parseRolls(rollRaw)
+	best := cands[0]
+	bestScore := scoreCandidate(best, rolls)
+	for _, c := range cands[1:] {
+		s := scoreCandidate(c, rolls)
+		if s > bestScore || (s == bestScore && c.ModID < best.ModID) {
+			best = c
+			bestScore = s
+		}
+	}
+	return best
+}
+
+func scoreCandidate(c modMeta, rolls []float64) float64 {
+	if len(rolls) == 0 {
+		return -float64(len(c.Stats))
+	}
+	n := len(rolls)
+	if len(c.Stats) < n {
+		n = len(c.Stats)
+	}
+	score := 0.0
+	for i := 0; i < n; i++ {
+		mn, mx, v := c.Stats[i].Min, c.Stats[i].Max, rolls[i]
+		if mx <= mn {
+			continue
+		}
+		if v >= mn && v <= mx {
+			score += 2
+		} else {
+			d := math.Min(math.Abs(v-mn), math.Abs(v-mx))
+			score += math.Max(0, 1-(d/(mx-mn)))
+		}
+	}
+	if len(c.Stats) == len(rolls) {
+		score += 0.5
+	}
+	return score
+}
+
 func setUnmatched(ctx context.Context, db *sql.DB, itemID int64, modType string, sortOrder int) error {
 	_, err := db.ExecContext(ctx, `
 UPDATE market.item_mods
@@ -114,27 +157,42 @@ WHERE item_id=$1 AND mod_type=$2 AND sort_order=$3`, itemID, modType, sortOrder)
 	return err
 }
 
-func loadStatPatterns(ctx context.Context, db *sql.DB) (map[string]string, error) {
+func loadStatPatterns(ctx context.Context, db *sql.DB) (map[string]string, []statPattern, error) {
 	rows, err := db.QueryContext(ctx, `SELECT stat_id, english_text FROM ref.stat_translations WHERE english_text IS NOT NULL AND english_text <> ''`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
-	out := map[string]string{}
+	exact := map[string]string{}
+	patterns := make([]statPattern, 0, 10000)
 	for rows.Next() {
 		var statID, text string
 		if err := rows.Scan(&statID, &text); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		n := normalizeLine(text)
 		if n == "" {
 			continue
 		}
-		if _, exists := out[n]; !exists {
-			out[n] = statID
+		if _, exists := exact[n]; !exists {
+			exact[n] = statID
+		}
+		patterns = append(patterns, statPattern{Norm: n, StatID: statID})
+	}
+	sort.Slice(patterns, func(i, j int) bool { return len(patterns[i].Norm) > len(patterns[j].Norm) })
+	return exact, patterns, rows.Err()
+}
+
+func findStatID(norm string, exact map[string]string, pats []statPattern) string {
+	if v, ok := exact[norm]; ok {
+		return v
+	}
+	for _, p := range pats {
+		if strings.Contains(norm, p.Norm) || strings.Contains(p.Norm, norm) {
+			return p.StatID
 		}
 	}
-	return out, rows.Err()
+	return ""
 }
 
 func loadModsByStat(ctx context.Context, db *sql.DB) (map[string][]modMeta, error) {
@@ -154,10 +212,7 @@ func loadModsByStat(ctx context.Context, db *sql.DB) (map[string][]modMeta, erro
 		if err := json.Unmarshal(statsRaw, &stats); err != nil || len(stats) == 0 {
 			continue
 		}
-		meta := modMeta{ModID: modID, Stats: stats, RawIDs: map[string]struct{}{}}
-		for _, s := range stats {
-			meta.RawIDs[s.ID] = struct{}{}
-		}
+		meta := modMeta{ModID: modID, Stats: stats}
 		for _, s := range stats {
 			out[s.ID] = append(out[s.ID], meta)
 		}
@@ -191,8 +246,7 @@ func normalizeLine(s string) string {
 }
 
 func computeRollPcts(stats []statEntry, rollRaw []byte) []float64 {
-	var rolls []float64
-	_ = json.Unmarshal(rollRaw, &rolls)
+	rolls := parseRolls(rollRaw)
 	if len(rolls) == 0 || len(stats) == 0 {
 		return []float64{}
 	}
@@ -215,6 +269,12 @@ func computeRollPcts(stats []statEntry, rollRaw []byte) []float64 {
 		}
 	}
 	return out
+}
+
+func parseRolls(raw []byte) []float64 {
+	var rolls []float64
+	_ = json.Unmarshal(raw, &rolls)
+	return rolls
 }
 
 func calcPct(v, minV, maxV float64) (float64, bool) {

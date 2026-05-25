@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -34,6 +35,15 @@ type runtimeQuery struct {
 	Hash string
 }
 
+type workerHealth struct {
+	name              string
+	startedAt         time.Time
+	lastOKUnix        atomic.Int64
+	consecutiveErrors atomic.Int64
+	lastErrorUnix     atomic.Int64
+	lastErrorText     atomic.Value
+}
+
 func (r *Runner) Run(ctx context.Context) error {
 	db, err := sql.Open("postgres", r.cfg.Postgres.DSN)
 	if err != nil {
@@ -50,10 +60,18 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	for _, wc := range r.cfg.Parser.Workers {
 		wc := wc
+		h := &workerHealth{name: wc.Name, startedAt: time.Now()}
+
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.runWorker(ctx, wc, repo, queries)
+			r.runWorker(ctx, wc, repo, queries, h)
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.runWorkerHealthLogger(ctx, h)
 		}()
 	}
 
@@ -62,7 +80,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *market.Repository, queries []runtimeQuery) {
+func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *market.Repository, queries []runtimeQuery, h *workerHealth) {
 	cli := trade2.New("https://www.pathofexile.com", r.cfg.Parser.League, r.poesessid, newHTTPClient(wc.Proxy, r.cfg.Parser.RequestTimeout.Duration), wc)
 	ticker := time.NewTicker(r.cfg.Parser.PollInterval.Duration)
 	defer ticker.Stop()
@@ -70,6 +88,9 @@ func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *ma
 	for {
 		for _, query := range queries {
 			if err := r.runCycle(ctx, cli, wc, repo, query); err != nil {
+				h.consecutiveErrors.Add(1)
+				h.lastErrorUnix.Store(time.Now().Unix())
+				h.lastErrorText.Store(err.Error())
 				log.Printf("worker=%s query=%s cycle error: %v", wc.Name, query.Name, err)
 				t := time.NewTimer(wc.Cooldown.Sleep.Duration)
 				select {
@@ -78,7 +99,10 @@ func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *ma
 					return
 				case <-t.C:
 				}
+				continue
 			}
+			h.lastOKUnix.Store(time.Now().Unix())
+			h.consecutiveErrors.Store(0)
 		}
 		select {
 		case <-ctx.Done():
@@ -86,6 +110,44 @@ func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *ma
 		case <-ticker.C:
 		}
 	}
+}
+
+func (r *Runner) runWorkerHealthLogger(ctx context.Context, h *workerHealth) {
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			lastErr := ""
+			if v := h.lastErrorText.Load(); v != nil {
+				if s, ok := v.(string); ok {
+					lastErr = s
+				}
+			}
+			if len(lastErr) > 160 {
+				lastErr = lastErr[:160] + "..."
+			}
+			log.Printf(
+				"worker=%s health uptime=%s last_ok=%s consecutive_errors=%d last_error_at=%s last_error=%q",
+				h.name,
+				time.Since(h.startedAt).Round(time.Second),
+				formatUnix(h.lastOKUnix.Load()),
+				h.consecutiveErrors.Load(),
+				formatUnix(h.lastErrorUnix.Load()),
+				lastErr,
+			)
+		}
+	}
+}
+
+func formatUnix(unix int64) string {
+	if unix <= 0 {
+		return "never"
+	}
+	return time.Unix(unix, 0).Format(time.RFC3339)
 }
 
 func (r *Runner) runCycle(ctx context.Context, cli *trade2.Client, wc config.WorkerConfig, repo *market.Repository, query runtimeQuery) error {

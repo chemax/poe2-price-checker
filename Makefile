@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: db-up db-down db-logs migrate-up migrate-down migrate-version ref-sync build
+.PHONY: db-up db-down db-logs migrate-up migrate-down migrate-version ref-sync mod-match build
 
 db-up:
 	docker compose up -d postgres
@@ -22,6 +22,9 @@ migrate-version:
 
 ref-sync:
 	DATABASE_DSN=$${DATABASE_DSN:-postgres://poe2:poe2@127.0.0.1:5432/poe2?sslmode=disable} go run ./cmd/refsync
+
+mod-match:
+	DATABASE_DSN=$${DATABASE_DSN:-postgres://poe2:poe2@127.0.0.1:5432/poe2?sslmode=disable} go run ./cmd/modmatch
 
 build:
 	go build ./...

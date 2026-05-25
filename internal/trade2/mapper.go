@@ -3,7 +3,9 @@ package trade2
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"poe2-price-checker/internal/market"
 )
@@ -102,7 +104,7 @@ func collectMods(item map[string]json.RawMessage) []market.ItemMod {
 			continue
 		}
 		for _, line := range lines {
-			out = append(out, market.ItemMod{ModType: t.mod, LineText: line, RollValues: []byte("[]"), SortOrder: order})
+			out = append(out, market.ItemMod{ModType: t.mod, LineText: line, RollValues: extractRollValues(line), SortOrder: order})
 			order++
 		}
 	}
@@ -124,6 +126,26 @@ func extractPrice(raw json.RawMessage) (*string, *string) {
 		return currency, &s
 	}
 	return currency, nil
+}
+
+var reNum = regexp.MustCompile(`[-+]?\d+(?:[\.,]\d+)?`)
+
+func extractRollValues(line string) json.RawMessage {
+	m := reNum.FindAllString(line, -1)
+	if len(m) == 0 {
+		return []byte("[]")
+	}
+	vals := make([]float64, 0, len(m))
+	for _, s := range m {
+		s = strings.ReplaceAll(s, ",", ".")
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			continue
+		}
+		vals = append(vals, f)
+	}
+	b, _ := json.Marshal(vals)
+	return b
 }
 
 func jsonObj(raw json.RawMessage) map[string]json.RawMessage {

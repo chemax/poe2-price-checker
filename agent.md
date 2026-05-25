@@ -21,9 +21,20 @@
 1. `cmd/parser` — отдельный бинарник парсинга (ingestion)
 2. `cmd/app` — основной сервис/API/аналитика (позже)
 
+## Источники данных
+- Primary справочники: `https://repoe-fork.github.io/poe2/`
+- Cross-check: `SilkroadLabs/rePoE2`, `LocalIdentity/poe2-data`
+- Уникальные предметы: Path of Building data export
+- poe2db.tw — только как справка глазами (не основной ingestion)
+
+## Граница ответственности БД
+- Справочники (base/class/tags/mod pools/translations) загружаются как внешний датасет и версионируются по обновлениям игры.
+- Собственная БД хранит в первую очередь **экземпляры рыночных предметов** и их цены, со ссылками на справочник (`base_item_id`, `mod_id`, ...).
+
 ## Parser: базовый контур
 - Pull из API рынка PoE2
 - Нормализация item/listing/mods
+- Разрешение ссылок на справочник по id
 - Запись в Postgres
 - Режим периодического опроса + backoff/retry
 - Метрики и логирование
@@ -68,7 +79,8 @@ parser:
 - Цена листинга (value + currency + timestamp + лига/сезон)
 
 ## План следующего шага
-1. Зафиксировать формат API-ответов PoE2 (образцы payload).
-2. Спроектировать схему БД (DDL v1) под ingestion + pricing queries.
-3. Поднять минимальный каркас Go-проекта (go mod, cmd/parser, internal/*).
-4. Сделать POC parser worker pool + per-worker proxy transport.
+1. Зафиксировать набор нужных справочников RePoE-fork и схему их синка (version/timestamp/checksum).
+2. Зафиксировать формат API-ответов PoE2 (образцы payload).
+3. Спроектировать схему БД (DDL v1) под instance-данные + pricing queries.
+4. Поднять минимальный каркас Go-проекта (go mod, cmd/parser, internal/*).
+5. Сделать POC parser worker pool + per-worker proxy transport.

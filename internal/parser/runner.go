@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -17,8 +18,6 @@ import (
 	"poe2-price-checker/internal/market"
 	"poe2-price-checker/internal/trade2"
 )
-
-const defaultQuery = `{"query":{"status":{"option":"online"}},"sort":{"price":"asc"}}`
 
 type Runner struct {
 	cfg       config.Config
@@ -35,7 +34,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer db.Close()
 
 	repo := market.NewRepository(db)
-	query := json.RawMessage(defaultQuery)
+	queries, err := buildQueries(r.cfg.Parser.Queries)
+	if err != nil {
+		return err
+	}
 	var wg sync.WaitGroup
 
 	for _, wc := range r.cfg.Parser.Workers {
@@ -43,7 +45,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.runWorker(ctx, wc, repo, query)
+			r.runWorker(ctx, wc, repo, queries)
 		}()
 	}
 
@@ -52,20 +54,22 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *market.Repository, query json.RawMessage) {
+func (r *Runner) runWorker(ctx context.Context, wc config.WorkerConfig, repo *market.Repository, queries []json.RawMessage) {
 	cli := trade2.New("https://www.pathofexile.com", r.cfg.Parser.League, r.poesessid, newHTTPClient(wc.Proxy, r.cfg.Parser.RequestTimeout.Duration), wc)
 	ticker := time.NewTicker(r.cfg.Parser.PollInterval.Duration)
 	defer ticker.Stop()
 
 	for {
-		if err := r.runCycle(ctx, cli, wc, repo, query); err != nil {
-			log.Printf("worker=%s cycle error: %v", wc.Name, err)
-			t := time.NewTimer(wc.Cooldown.Sleep.Duration)
-			select {
-			case <-ctx.Done():
-				t.Stop()
-				return
-			case <-t.C:
+		for i, query := range queries {
+			if err := r.runCycle(ctx, cli, wc, repo, query); err != nil {
+				log.Printf("worker=%s query=%d cycle error: %v", wc.Name, i, err)
+				t := time.NewTimer(wc.Cooldown.Sleep.Duration)
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return
+				case <-t.C:
+				}
 			}
 		}
 		select {
@@ -104,6 +108,18 @@ func (r *Runner) runCycle(ctx context.Context, cli *trade2.Client, wc config.Wor
 	}
 	log.Printf("worker=%s synced=%d", wc.Name, len(fr.Result))
 	return nil
+}
+
+func buildQueries(in []config.QueryConfig) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, 0, len(in))
+	for i, q := range in {
+		b, err := json.Marshal(q.Body)
+		if err != nil {
+			return nil, fmt.Errorf("marshal parser.queries[%d]: %w", i, err)
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }
 
 func newHTTPClient(proxyAddr string, timeout time.Duration) *http.Client {

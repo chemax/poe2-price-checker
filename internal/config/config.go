@@ -29,7 +29,13 @@ type ParserConfig struct {
 	League         string         `yaml:"league"`
 	PollInterval   Duration       `yaml:"poll_interval"`
 	RequestTimeout Duration       `yaml:"request_timeout"`
+	Queries        []QueryConfig  `yaml:"queries"`
 	Workers        []WorkerConfig `yaml:"workers"`
+}
+
+type QueryConfig struct {
+	Name string         `yaml:"name"`
+	Body map[string]any `yaml:"body"`
 }
 
 type WorkerConfig struct {
@@ -93,6 +99,14 @@ func Load(path string) (Config, error) {
 func (c Config) Validate() error {
 	if c.Parser.League == "" {
 		return fmt.Errorf("parser.league is required")
+	}
+	if len(c.Parser.Queries) == 0 {
+		return fmt.Errorf("parser.queries must contain at least 1 query")
+	}
+	for i, q := range c.Parser.Queries {
+		if len(q.Body) == 0 {
+			return fmt.Errorf("parser.queries[%d].body is required", i)
+		}
 	}
 	if len(c.Parser.Workers) == 0 {
 		return fmt.Errorf("parser.workers must not be empty")

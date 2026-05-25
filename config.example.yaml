@@ -13,6 +13,23 @@ parser:
   poll_interval: "2s"
   request_timeout: "15s"
 
+  queries:
+    - name: "online_cheap"
+      body:
+        query:
+          status:
+            option: "online"
+        sort:
+          price: "asc"
+
+    - name: "online_recent"
+      body:
+        query:
+          status:
+            option: "online"
+        sort:
+          indexed: "desc"
+
   workers:
     - name: "w1"
       proxy: "" # empty => direct

@@ -23,6 +23,9 @@ func MapTradeEntryToListing(raw json.RawMessage, league string) (market.Listing,
 	}
 
 	tradeListingID := jsonString(listingObj["id"])
+	if tradeListingID == "" {
+		tradeListingID = jsonString(root["id"])
+	}
 	tradeItemID := jsonString(itemObj["id"])
 	if tradeListingID == "" || tradeItemID == "" {
 		return market.Listing{}, fmt.Errorf("missing ids")
@@ -34,12 +37,17 @@ func MapTradeEntryToListing(raw json.RawMessage, league string) (market.Listing,
 	stash := jsonStringPtr(listingObj["stash"])
 	acc := jsonStringPtr(listingObj["accountName"])
 	if acc == nil {
-		acc = jsonStringPtr(listingObj["account"]) // fallback
+		if acctObj := jsonObj(listingObj["account"]); acctObj != nil {
+			acc = jsonStringPtr(acctObj["name"])
+		}
+	}
+	if acc == nil {
+		acc = jsonStringPtr(listingObj["account"]) // legacy fallback
 	}
 
 	x := jsonIntPtr(itemObj["x"])
 	y := jsonIntPtr(itemObj["y"])
-	baseID := jsonStringPtr(itemObj["baseType"])
+	var baseID *string
 
 	mods := collectMods(itemObj)
 	rarity := jsonStringPtr(itemObj["rarity"])
@@ -86,7 +94,7 @@ func collectMods(item map[string]json.RawMessage) []market.ItemMod {
 	types := []struct {
 		key string
 		mod string
-	}{{"implicitMods", "implicit"}, {"explicitMods", "explicit"}, {"enchantMods", "enchant"}, {"craftedMods", "crafted"}}
+	}{{"implicitMods", "implicit"}, {"explicitMods", "explicit"}, {"enchantMods", "enchant"}, {"craftedMods", "crafted"}, {"runeMods", "rune"}, {"desecratedMods", "desecrated"}}
 	order := 1
 	for _, t := range types {
 		var lines []string
@@ -116,6 +124,14 @@ func extractPrice(raw json.RawMessage) (*string, *string) {
 		return currency, &s
 	}
 	return currency, nil
+}
+
+func jsonObj(raw json.RawMessage) map[string]json.RawMessage {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 func jsonString(raw json.RawMessage) string {

@@ -29,7 +29,6 @@ type ParserConfig struct {
 	League         string         `yaml:"league"`
 	PollInterval   Duration       `yaml:"poll_interval"`
 	RequestTimeout Duration       `yaml:"request_timeout"`
-	MaxListingAge  Duration       `yaml:"max_listing_age"`
 	Queries        []QueryConfig  `yaml:"queries"`
 	Workers        []WorkerConfig `yaml:"workers"`
 }

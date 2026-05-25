@@ -38,6 +38,8 @@ type statPattern struct {
 
 type matcherStats struct{ Total, Matched, Unmatched int }
 
+type itemHashes map[string]map[int]string // mod_type -> local index -> hash
+
 func (m *ModMatcher) Run(ctx context.Context) (string, error) {
 	exactMap, patterns, err := loadStatPatterns(ctx, m.db)
 	if err != nil {
@@ -49,29 +51,51 @@ func (m *ModMatcher) Run(ctx context.Context) (string, error) {
 	}
 
 	rows, err := m.db.QueryContext(ctx, `
-SELECT item_id, mod_type, sort_order, line_text, roll_values
-FROM market.item_mods
-ORDER BY item_id, sort_order`)
+SELECT im.item_id, im.mod_type, im.sort_order, im.line_text, im.roll_values, i.payload
+FROM market.item_mods im
+JOIN market.items i ON i.id = im.item_id
+ORDER BY im.item_id, im.mod_type, im.sort_order`)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 
 	st := matcherStats{}
+	currentItemID := int64(-1)
+	currentHashes := itemHashes{}
+	localIdx := map[string]int{}
+
 	for rows.Next() {
 		var itemID int64
 		var modType, line string
 		var sortOrder int
 		var rollRaw []byte
-		if err := rows.Scan(&itemID, &modType, &sortOrder, &line, &rollRaw); err != nil {
+		var payloadRaw []byte
+		if err := rows.Scan(&itemID, &modType, &sortOrder, &line, &rollRaw, &payloadRaw); err != nil {
 			return "", err
 		}
 		st.Total++
 
+		if itemID != currentItemID {
+			currentItemID = itemID
+			currentHashes = extractItemHashes(payloadRaw)
+			localIdx = map[string]int{}
+		}
+
+		idx := localIdx[modType]
+		localIdx[modType] = idx + 1
+		hash := currentHashes[modType][idx]
+
 		norm := normalizeLine(line)
 		statID := findStatID(norm, exactMap, patterns)
+		matchedViaText := statID != ""
+
 		if statID == "" {
-			if err := setUnmatched(ctx, m.db, itemID, modType, sortOrder); err != nil {
+			reason := "unknown_stat_id"
+			if hash == "" {
+				reason = "text_only_fallback"
+			}
+			if err := setUnmatched(ctx, m.db, itemID, modType, sortOrder, hash, reason); err != nil {
 				return "", err
 			}
 			st.Unmatched++
@@ -80,7 +104,13 @@ ORDER BY item_id, sort_order`)
 
 		candidates := modsByStat[statID]
 		if len(candidates) == 0 {
-			if err := setUnmatched(ctx, m.db, itemID, modType, sortOrder); err != nil {
+			reason := "missing_hash_in_ref"
+			if modType == "rune" {
+				reason = "rune_unmapped"
+			} else if modType == "desecrated" {
+				reason = "desecrated_unmapped"
+			}
+			if err := setUnmatched(ctx, m.db, itemID, modType, sortOrder, hash, reason); err != nil {
 				return "", err
 			}
 			st.Unmatched++
@@ -90,11 +120,22 @@ ORDER BY item_id, sort_order`)
 		mod := pickBestCandidate(candidates, modType, rollRaw)
 		rollPcts := computeRollPcts(mod.Stats, rollRaw)
 		rollPctsJSON, _ := json.Marshal(rollPcts)
+		reason := "hash_matched"
+		if hash == "" {
+			reason = "text_only_fallback"
+		}
+		if len(rollPcts) > 0 && len(mod.Stats) > len(rollPcts) {
+			reason = "hybrid_partial"
+		}
+		if !matchedViaText && hash != "" {
+			reason = "unknown_stat_id"
+		}
+
 		if _, err := m.db.ExecContext(ctx, `
 UPDATE market.item_mods
-SET mod_id=$1, match_status='matched', matched_text=$2, roll_pcts=$3
-WHERE item_id=$4 AND mod_type=$5 AND sort_order=$6`,
-			mod.ModID, statID, rollPctsJSON, itemID, modType, sortOrder,
+SET mod_id=$1, match_status='matched', matched_text=$2, roll_pcts=$3, stat_hash=$4, match_reason=$5
+WHERE item_id=$6 AND mod_type=$7 AND sort_order=$8`,
+			mod.ModID, statID, rollPctsJSON, nullableStr(hash), reason, itemID, modType, sortOrder,
 		); err != nil {
 			return "", err
 		}
@@ -105,6 +146,58 @@ WHERE item_id=$4 AND mod_type=$5 AND sort_order=$6`,
 	}
 
 	return fmt.Sprintf("mod matcher: total=%d matched=%d unmatched=%d matched_pct=%.2f", st.Total, st.Matched, st.Unmatched, percent(st.Matched, st.Total)), nil
+}
+
+func extractItemHashes(payloadRaw []byte) itemHashes {
+	out := itemHashes{}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(payloadRaw, &payload); err != nil {
+		return out
+	}
+	extRaw, ok := payload["extended"]
+	if !ok {
+		return out
+	}
+	var ext map[string]json.RawMessage
+	if err := json.Unmarshal(extRaw, &ext); err != nil {
+		return out
+	}
+	hashesRaw, ok := ext["hashes"]
+	if !ok {
+		return out
+	}
+	var hByType map[string][]json.RawMessage
+	if err := json.Unmarshal(hashesRaw, &hByType); err != nil {
+		return out
+	}
+	for t, arr := range hByType {
+		m := map[int]string{}
+		for _, pairRaw := range arr {
+			var pair []json.RawMessage
+			if json.Unmarshal(pairRaw, &pair) != nil || len(pair) < 2 {
+				continue
+			}
+			h := jsonString(pair[0])
+			var idxs []int
+			if json.Unmarshal(pair[1], &idxs) != nil {
+				continue
+			}
+			for _, idx := range idxs {
+				if _, exists := m[idx]; !exists && h != "" {
+					m[idx] = h
+				}
+			}
+		}
+		out[t] = m
+	}
+	return out
+}
+
+func nullableStr(s string) any {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return s
 }
 
 func pickBestCandidate(cands []modMeta, modType string, rollRaw []byte) modMeta {
@@ -181,11 +274,11 @@ func modTypeBonus(modType string, c modMeta) float64 {
 	}
 }
 
-func setUnmatched(ctx context.Context, db *sql.DB, itemID int64, modType string, sortOrder int) error {
+func setUnmatched(ctx context.Context, db *sql.DB, itemID int64, modType string, sortOrder int, hash string, reason string) error {
 	_, err := db.ExecContext(ctx, `
 UPDATE market.item_mods
-SET mod_id=NULL, match_status='unmatched', matched_text=NULL, roll_pcts='[]'::jsonb
-WHERE item_id=$1 AND mod_type=$2 AND sort_order=$3`, itemID, modType, sortOrder)
+SET mod_id=NULL, match_status='unmatched', matched_text=NULL, roll_pcts='[]'::jsonb, stat_hash=$4, match_reason=$5
+WHERE item_id=$1 AND mod_type=$2 AND sort_order=$3`, itemID, modType, sortOrder, nullableStr(hash), reason)
 	return err
 }
 
@@ -372,4 +465,10 @@ func percent(part, total int) float64 {
 		return 0
 	}
 	return float64(part) * 100 / float64(total)
+}
+
+func jsonString(raw json.RawMessage) string {
+	var s string
+	_ = json.Unmarshal(raw, &s)
+	return s
 }

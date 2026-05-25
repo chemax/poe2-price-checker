@@ -137,7 +137,14 @@ ORDER BY im.item_id, im.mod_type, im.sort_order`)
 			continue
 		}
 
-		mod := pickBestCandidate(candidates, modType, rollRaw)
+		mod, ok := pickBestCandidate(candidates, modType, rollRaw)
+		if !ok {
+			if err := setUnmatched(ctx, m.db, itemID, modType, sortOrder, hash, "low_similarity"); err != nil {
+				return "", err
+			}
+			st.Unmatched++
+			continue
+		}
 		rollPcts := computeRollPcts(mod.Stats, rollRaw)
 		rollPctsJSON, _ := json.Marshal(rollPcts)
 		reason := "hash_matched"
@@ -147,12 +154,16 @@ ORDER BY im.item_id, im.mod_type, im.sort_order`)
 		if len(rollPcts) > 0 && len(mod.Stats) > len(rollPcts) {
 			reason = "hybrid_partial"
 		}
+		isConfident := reason == "hash_matched"
+		if reason == "hybrid_partial" {
+			isConfident = false
+		}
 
 		if _, err := m.db.ExecContext(ctx, `
 UPDATE market.item_mods
-SET mod_id=$1, match_status='matched', matched_text=$2, roll_pcts=$3, stat_hash=$4, match_reason=$5
-WHERE item_id=$6 AND mod_type=$7 AND sort_order=$8`,
-			mod.ModID, statID, rollPctsJSON, nullableStr(hash), reason, itemID, modType, sortOrder,
+SET mod_id=$1, match_status='matched', matched_text=$2, roll_pcts=$3, stat_hash=$4, match_reason=$5, is_confident=$6
+WHERE item_id=$7 AND mod_type=$8 AND sort_order=$9`,
+			mod.ModID, statID, rollPctsJSON, nullableStr(hash), reason, isConfident, itemID, modType, sortOrder,
 		); err != nil {
 			return "", err
 		}
@@ -239,21 +250,35 @@ func nullableStr(s string) any {
 	return s
 }
 
-func pickBestCandidate(cands []modMeta, modType string, rollRaw []byte) modMeta {
+func pickBestCandidate(cands []modMeta, modType string, rollRaw []byte) (modMeta, bool) {
 	if len(cands) == 1 {
-		return cands[0]
+		if scoreCandidate(cands[0], modType, parseRolls(rollRaw)) < 0.85 {
+			return modMeta{}, false
+		}
+		return cands[0], true
 	}
 	rolls := parseRolls(rollRaw)
 	best := cands[0]
 	bestScore := scoreCandidate(best, modType, rolls)
+	second := -1e9
 	for _, c := range cands[1:] {
 		s := scoreCandidate(c, modType, rolls)
+		if s > second {
+			second = s
+		}
 		if s > bestScore || (s == bestScore && c.ModID < best.ModID) {
+			second = bestScore
 			best = c
 			bestScore = s
 		}
 	}
-	return best
+	if bestScore < 0.85 {
+		return modMeta{}, false
+	}
+	if second > -1e8 && (bestScore-second) < 0.05 {
+		return modMeta{}, false
+	}
+	return best, true
 }
 
 func scoreCandidate(c modMeta, modType string, rolls []float64) float64 {
@@ -285,6 +310,10 @@ func scoreCandidate(c modMeta, modType string, rolls []float64) float64 {
 }
 
 func modTypeBonus(modType string, c modMeta) float64 {
+	modID := strings.ToLower(c.ModID)
+	if (modType == "explicit" || modType == "implicit" || modType == "rune" || modType == "desecrated") && strings.Contains(modID, "map_") {
+		return -2.0
+	}
 	switch modType {
 	case "desecrated":
 		if c.Domain == "desecrated" {
@@ -316,7 +345,7 @@ func modTypeBonus(modType string, c modMeta) float64 {
 func setUnmatched(ctx context.Context, db *sql.DB, itemID int64, modType string, sortOrder int, hash string, reason string) error {
 	_, err := db.ExecContext(ctx, `
 UPDATE market.item_mods
-SET mod_id=NULL, match_status='unmatched', matched_text=NULL, roll_pcts='[]'::jsonb, stat_hash=$4, match_reason=$5
+SET mod_id=NULL, match_status='unmatched', matched_text=NULL, roll_pcts='[]'::jsonb, stat_hash=$4, match_reason=$5, is_confident=FALSE
 WHERE item_id=$1 AND mod_type=$2 AND sort_order=$3`, itemID, modType, sortOrder, nullableStr(hash), reason)
 	return err
 }
@@ -385,23 +414,22 @@ func findStatID(norm string, exact map[string]string, pats []statPattern) string
 	if v, ok := exact[norm]; ok {
 		return v
 	}
-	for _, p := range pats {
-		if strings.Contains(norm, p.Norm) || strings.Contains(p.Norm, norm) {
-			return p.StatID
-		}
-	}
 
 	baseTokens := tokenSet(norm)
 	bestID := ""
 	bestScore := 0.0
+	secondScore := 0.0
 	for _, p := range pats {
 		s := jaccard(baseTokens, tokenSet(p.Norm))
 		if s > bestScore {
+			secondScore = bestScore
 			bestScore = s
 			bestID = p.StatID
+		} else if s > secondScore {
+			secondScore = s
 		}
 	}
-	if bestScore >= 0.50 {
+	if bestScore >= 0.85 && (bestScore-secondScore) >= 0.05 {
 		return bestID
 	}
 	return ""

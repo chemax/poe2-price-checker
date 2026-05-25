@@ -56,7 +56,9 @@ func Sync(ctx context.Context, db *sql.DB) (string, error) {
 			n := normalizeLine(e.Text)
 			statID := ""
 			method := "unmapped"
-			if v, ok := exact[n]; ok {
+			if v, ok := trade2HashOverrides[e.ID]; ok {
+				statID, method = v, "override"
+			} else if v, ok := exact[n]; ok {
 				statID, method = v, "exact"
 			} else if v := findStatID(n, exact, patterns); v != "" {
 				statID, method = v, "fuzzy"
@@ -186,22 +188,21 @@ func findStatID(norm string, exact map[string]string, pats []statPattern) string
 	if v, ok := exact[norm]; ok {
 		return v
 	}
-	for _, p := range pats {
-		if strings.Contains(norm, p.Norm) || strings.Contains(p.Norm, norm) {
-			return p.StatID
-		}
-	}
 	base := tokenSet(norm)
 	bestID := ""
 	best := 0.0
+	second := 0.0
 	for _, p := range pats {
 		s := jaccard(base, tokenSet(p.Norm))
 		if s > best {
+			second = best
 			best = s
 			bestID = p.StatID
+		} else if s > second {
+			second = s
 		}
 	}
-	if best >= 0.50 {
+	if best >= 0.85 && (best-second) >= 0.05 {
 		return bestID
 	}
 	return ""
@@ -269,4 +270,43 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+var trade2HashOverrides = map[string]string{
+	"explicit.stat_1509134228":   "physical_damage_+%",
+	"desecrated.stat_1509134228": "physical_damage_+%",
+	"enchant.stat_1509134228":    "physical_damage_+%",
+
+	"explicit.stat_3035140377": "attack_skill_gem_level_+",
+	"explicit.stat_9187492":    "melee_skill_gem_level_+",
+
+	"explicit.stat_1881230714": "base_should_have_onslaught_from_stat",
+
+	"explicit.stat_55876295":    "local_life_leech_from_physical_damage_permyriad",
+	"explicit.stat_669069897":   "local_mana_leech_from_physical_damage_permyriad",
+	"desecrated.stat_669069897": "local_mana_leech_from_physical_damage_permyriad",
+
+	"explicit.stat_387439868":   "elemental_damage_+%",
+	"desecrated.stat_387439868": "elemental_damage_+%",
+	"enchant.stat_387439868":    "elemental_damage_+%",
+
+	"explicit.stat_210067635":   "local_attack_speed_+%",
+	"desecrated.stat_210067635": "local_attack_speed_+%",
+	"enchant.stat_210067635":    "local_attack_speed_+%",
+
+	"explicit.stat_791928121": "stun_threshold_+%",
+	"explicit.stat_748522257": "base_stun_duration_+%",
+
+	"implicit.stat_2527686725": "shock_magnitude_+%",
+	"implicit.stat_2968503605": "flammability_magnitude_+%",
+	"implicit.stat_1702195217": "local_additional_block_chance_%",
+
+	"explicit.stat_691932474": "local_accuracy_rating",
+
+	"explicit.stat_4019237939": "gain_%_of_damage_as_extra_physical_damage",
+	"explicit.stat_3015669065": "gain_%_of_damage_as_extra_fire_damage",
+	"explicit.stat_2505884597": "gain_%_of_damage_as_extra_cold_damage",
+	"explicit.stat_3278136794": "gain_%_of_damage_as_extra_lightning_damage",
+
+	"desecrated.stat_1434716233": "warcry_empowers_next_x_melee_attacks",
 }
